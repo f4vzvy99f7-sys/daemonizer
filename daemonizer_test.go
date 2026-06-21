@@ -1,4 +1,4 @@
-package main
+package daemonizer_test
 
 import (
 	"bytes"
@@ -6,18 +6,18 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/MaxDillon/daemonizer/daemon"
+	"github.com/MaxDillon/daemonizer"
 )
 
 type MyClient struct {
 	GetRecord    func(key string) (*string, error)
-	PrintRecords func(out daemon.Writer) error
+	PrintRecords func(out daemonizer.Writer) error
 }
 
 func TestExampleClient(t *testing.T) {
 	serviceName := t.Name()
 
-	d := daemon.Client(serviceName, func(ctx context.Context, impl *MyClient, _ any) (daemon.CleanupFunc, error) {
+	daemon := daemonizer.Client(serviceName, func(ctx context.Context, impl *MyClient, _ any) (daemonizer.CleanupFunc, error) {
 		var data = map[string]string{"foo": "bar"}
 
 		impl.GetRecord = func(key string) (*string, error) {
@@ -27,7 +27,7 @@ func TestExampleClient(t *testing.T) {
 			return nil, nil
 		}
 
-		impl.PrintRecords = func(out daemon.Writer) error {
+		impl.PrintRecords = func(out daemonizer.Writer) error {
 			for key, value := range data {
 				fmt.Fprintf(out, "%s: %s\n", key, value)
 			}
@@ -39,17 +39,17 @@ func TestExampleClient(t *testing.T) {
 		}, nil
 	})
 
-	err := d.Start(map[string]string{}, nil)
-	defer d.Stop()
+	err := daemon.Start(map[string]string{}, nil)
+	defer daemon.Stop()
 	if err != nil {
 		t.Error(err)
 	}
 
-	if d.IsRunning() == false {
+	if daemon.IsRunning() == false {
 		t.Error("Daemon isnt running")
 	}
 
-	if record, err := d.Client.GetRecord("foo"); err != nil {
+	if record, err := daemon.Client.GetRecord("foo"); err != nil {
 		t.Error(err)
 	} else if record == nil {
 		t.Error("record is nil")
@@ -58,7 +58,7 @@ func TestExampleClient(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err = d.Client.PrintRecords(daemon.Wrap(&buf))
+	err = daemon.Client.PrintRecords(daemonizer.Wrap(&buf))
 	if err != nil {
 		t.Error(err)
 	}

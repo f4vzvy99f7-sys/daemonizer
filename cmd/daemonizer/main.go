@@ -6,7 +6,7 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/MaxDillon/daemonizer/daemon"
+	daemonizer "github.com/MaxDillon/daemonizer"
 )
 
 type MathClient struct {
@@ -19,19 +19,19 @@ type Config struct {
 	Greeting string
 }
 
-var d = daemon.Client[MathClient, Config]("my-service", func(ctx context.Context, impl *MathClient, cfg Config) (daemon.CleanupFunc, error) {
+var d = daemonizer.Client("my-service", func(ctx context.Context, impl *MathClient, cfg Config) (daemonizer.CleanupFunc, error) {
 	counter := 0
 
 	impl.Add = func(a, b int) (int, error) {
-		daemon.Logger().Printf("Adding %d and %d", a, b)
+		daemonizer.Logger().Printf("Adding %d and %d", a, b)
 		return a + b, nil
 	}
 	impl.Greet = func(name string) (string, error) {
 		if cfg.Greeting != "" {
-			daemon.Logger().Printf("Greeting %s", cfg.Greeting)
+			daemonizer.Logger().Printf("Greeting %s", cfg.Greeting)
 			return fmt.Sprintf("%s, %s!", cfg.Greeting, name), nil
 		}
-		daemon.Logger().Printf("Greeting %s", name)
+		daemonizer.Logger().Printf("Greeting %s", name)
 		return fmt.Sprintf("Hello, %s!", name), nil
 	}
 	impl.Inc = func() (int, error) {
@@ -40,7 +40,7 @@ var d = daemon.Client[MathClient, Config]("my-service", func(ctx context.Context
 	}
 
 	return func() {
-		daemon.Logger().Printf("shutting down, final counter: %d", counter)
+		daemonizer.Logger().Printf("shutting down, final counter: %d", counter)
 	}, nil
 })
 
@@ -58,7 +58,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("daemon started")
+		fmt.Println("daemonizer started")
 		return
 
 	case "stop":
@@ -66,7 +66,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("daemon stopped")
+		fmt.Println("daemonizer stopped")
 		return
 
 	case "restart":
@@ -78,12 +78,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("daemon restarted")
+		fmt.Println("daemonizer restarted")
 		return
 	}
 
 	if !d.IsRunning() {
-		fmt.Fprintf(os.Stderr, "daemon is not running — use '%s start' to start it\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "daemonizer is not running — use '%s start' to start it\n", os.Args[0])
 		os.Exit(1)
 	}
 

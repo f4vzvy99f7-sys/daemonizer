@@ -1,4 +1,4 @@
-// Package daemon provides a library for building long-lived daemon processes
+// Package daemonizer provides a library for building long-lived daemon processes
 // with type-safe IPC for Go CLI tools. A single binary acts as both the daemon
 // and the client: the daemon is automatically started and detached via Start,
 // and subsequent invocations communicate with it over a Unix socket.
@@ -32,7 +32,7 @@
 //
 // Runtime files (socket, PID) are stored under $XDG_RUNTIME_DIR/<name>.
 // Log files are stored under $XDG_STATE_HOME/<name>/<name>.log.
-package daemon
+package daemonizer
 
 import (
 	"bytes"
