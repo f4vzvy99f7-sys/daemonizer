@@ -44,6 +44,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -84,6 +85,8 @@ type response struct {
 
 const daemonEnvKey = "__DAEMON_SERVICE"
 const daemonReadyFDEnvKey = "__DAEMON_READY_FD"
+const daemonPipeStdoutKey = "DAEMONIZER_PIPE_STDOUT"
+const daemonPipeStderrKey = "DAEMONIZER_PIPE_STDERR"
 
 // ErrNotRunning is returned by Start and Stop when the daemon process is not
 // running.
@@ -136,7 +139,9 @@ func Wrap(w io.Writer) Writer { return Writer{w: w} }
 
 // StartupOptions configures the daemon process when calling Start.
 type StartupOptions struct {
-	Env map[string]string // additional environment variables for the daemon process
+	Env                 map[string]string
+	PipeStdoutToLogfile bool // redirect os.Stdout to daemon log file
+	PipeStderrToLogfile bool // redirect os.Stderr to daemon log file
 }
 
 func Start(client any, opts *StartupOptions) error {
@@ -144,9 +149,15 @@ func Start(client any, opts *StartupOptions) error {
 	if !ok {
 		return fmt.Errorf("client not found in registry")
 	}
-	var env map[string]string
+	env := make(map[string]string)
 	if opts != nil {
-		env = opts.Env
+		maps.Copy(env, opts.Env)
+		if opts.PipeStdoutToLogfile {
+			env[daemonPipeStdoutKey] = "1"
+		}
+		if opts.PipeStderrToLogfile {
+			env[daemonPipeStderrKey] = "1"
+		}
 	}
 	return d.(*Daemon).start(env)
 }
@@ -263,6 +274,13 @@ func Client[T any](name string, setup func(ctx context.Context, impl *T) (Cleanu
 		daemonLogFile = logFile
 		daemonLogger = log.New(logFile, "", log.LstdFlags)
 		defer func() { daemonLogFile.Close() }()
+
+		if os.Getenv(daemonPipeStdoutKey) == "1" {
+			os.Stdout = logFile
+		}
+		if os.Getenv(daemonPipeStderrKey) == "1" {
+			os.Stderr = logFile
+		}
 
 		// signalReady writes msg to the parent's startup pipe (if present) and
 		// closes it. Called once: either "ok" after the socket is bound, or an
