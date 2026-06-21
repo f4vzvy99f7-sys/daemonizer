@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/MaxDillon/daemonizer"
+	"github.com/f4vzvy99f7-sys/daemonizer"
 )
 
 type MyClient struct {

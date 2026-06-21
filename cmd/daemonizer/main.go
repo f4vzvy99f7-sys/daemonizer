@@ -6,7 +6,7 @@ import (
 	"os"
 	"strconv"
 
-	daemonizer "github.com/MaxDillon/daemonizer"
+	daemonizer "github.com/f4vzvy99f7-sys/daemonizer"
 )
 
 type MathClient struct {
