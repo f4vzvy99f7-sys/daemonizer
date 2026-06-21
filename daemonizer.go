@@ -14,7 +14,7 @@
 //	    Greet func(name string) (string, error)
 //	}
 //
-//	var d = daemon.Client[MyClient, struct{}]("my-service", func(ctx context.Context, impl *MyClient, _ struct{}) (daemon.CleanupFunc, error) {
+//	var d = daemonizer.Client[MyClient, struct{}]("my-service", func(ctx context.Context, impl *MyClient, _ struct{}) (daemonizer.CleanupFunc, error) {
 //	    impl.Add = func(a, b int) (int, error) { return a + b, nil }
 //	    impl.Greet = func(name string) (string, error) {
 //	        return fmt.Sprintf("Hello, %s!", name), nil
@@ -29,6 +29,9 @@
 //	        d.Start(struct{}{}, nil)
 //	    }
 //	}
+//
+// The daemon also supports streaming data back to the caller via the Writer type
+// (wrapped with Wrap), and log rotation via ArchiveLog.
 //
 // Runtime files (socket, PID) are stored under $XDG_RUNTIME_DIR/<name>.
 // Log files are stored under $XDG_STATE_HOME/<name>/<name>.log.
@@ -130,7 +133,7 @@ func (w *Writer) GobDecode(data []byte) error {
 // Wrap wraps an io.Writer into a Writer for passing to daemon handler
 // functions. Typically used on the client side:
 //
-//	d.Client.PrintRecords(daemon.Wrap(os.Stdout))
+//	d.Client.PrintRecords(daemonizer.Wrap(os.Stdout))
 func Wrap(w io.Writer) Writer { return Writer{w: w} }
 
 // StartupOptions configures the daemon process when calling Start.
@@ -153,7 +156,9 @@ type handler struct {
 // T is the client type defining RPC methods as func fields.
 // C is the config type passed to setup when Start is called.
 type Daemon[T any, C any] struct {
-	Client *T // IPC stubs — call RPC methods on this field
+	// Client holds the IPC stubs for calling RPC methods on the daemon.
+	// Each exported func field in T becomes a remote-procedure call.
+	Client *T
 
 	name     string
 	handlers map[string]handler
@@ -343,7 +348,7 @@ func Client[T any, C any](name string, setup func(ctx context.Context, impl *T, 
 	t := v.Type()
 
 	if t.Kind() != reflect.Struct {
-		fmt.Fprintf(os.Stderr, "daemon.Client: type parameter must be a struct, got %v\n", t.Kind())
+		fmt.Fprintf(os.Stderr, "daemonizer.Client: type parameter must be a struct, got %v\n", t.Kind())
 		os.Exit(1)
 	}
 
@@ -355,7 +360,7 @@ func Client[T any, C any](name string, setup func(ctx context.Context, impl *T, 
 		}
 		ft := field.Type
 		if ft.NumOut() == 0 || ft.Out(ft.NumOut()-1) != errType {
-			fmt.Fprintf(os.Stderr, "daemon.Client: field %s must have error as last return value\n", field.Name)
+			fmt.Fprintf(os.Stderr, "daemonizer.Client: field %s must have error as last return value\n", field.Name)
 			os.Exit(1)
 		}
 		v.Field(i).Set(makeStub(d, field.Name, ft))
@@ -847,7 +852,6 @@ func (d *Daemon[T, C]) stop() error {
 
 // ─── Public lifecycle methods ──────────────────────────────────────────────
 
-// Start launches the daemon process with the given config and startup options.
 // Start launches the daemon process with the given config and startup options.
 // cfg is JSON-encoded to the daemon subprocess and decoded before setup runs.
 func (d *Daemon[T, C]) Start(cfg C, opts *StartupOptions) error {
