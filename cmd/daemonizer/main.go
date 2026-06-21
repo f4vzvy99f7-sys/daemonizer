@@ -23,15 +23,15 @@ var d = daemonizer.Client("my-service", func(ctx context.Context, impl *MathClie
 	counter := 0
 
 	impl.Add = func(a, b int) (int, error) {
-		daemonizer.Logger().Printf("Adding %d and %d", a, b)
+		daemonizer.Log().Infof("Adding %d and %d", a, b)
 		return a + b, nil
 	}
 	impl.Greet = func(name string) (string, error) {
 		if cfg.Greeting != "" {
-			daemonizer.Logger().Printf("Greeting %s", cfg.Greeting)
+			daemonizer.Log().Infof("Greeting %s", cfg.Greeting)
 			return fmt.Sprintf("%s, %s!", cfg.Greeting, name), nil
 		}
-		daemonizer.Logger().Printf("Greeting %s", name)
+		daemonizer.Log().Infof("Greeting %s", name)
 		return fmt.Sprintf("Hello, %s!", name), nil
 	}
 	impl.Inc = func() (int, error) {
@@ -40,7 +40,7 @@ var d = daemonizer.Client("my-service", func(ctx context.Context, impl *MathClie
 	}
 
 	return func() {
-		daemonizer.Logger().Printf("shutting down, final counter: %d", counter)
+		daemonizer.Log().Infof("shutting down, final counter: %d", counter)
 	}, nil
 })
 

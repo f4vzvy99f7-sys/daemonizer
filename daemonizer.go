@@ -46,7 +46,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -90,12 +90,13 @@ const daemonReadyFDEnvKey = "__DAEMON_READY_FD"
 const daemonPipeStdoutKey = "DAEMONIZER_PIPE_STDOUT"
 const daemonPipeStderrKey = "DAEMONIZER_PIPE_STDERR"
 const daemonConfigKey = "DAEMONIZER_CONFIG"
+const daemonLogLevelKey = "DAEMONIZER_LOG_LEVEL"
 
 // ErrNotRunning is returned by Start and Stop when the daemon process is not
 // running.
 var ErrNotRunning = errors.New("daemon is not running")
 
-var daemonLogger *log.Logger
+var daemonLogger *Logger
 var daemonLogFile *os.File
 var daemonLogPath string
 
@@ -136,10 +137,128 @@ func (w *Writer) GobDecode(data []byte) error {
 //	d.Client.PrintRecords(daemonizer.Wrap(os.Stdout))
 func Wrap(w io.Writer) Writer { return Writer{w: w} }
 
+// ─── Log level and Logger ────────────────────────────────────────────────────
+
+// LogLevel controls which log messages are recorded.
+type LogLevel int
+
+const (
+	LogLevelDebug LogLevel = iota - 1 // matches slog.LevelDebug
+	LogLevelInfo  LogLevel = 0
+	LogLevelWarn  LogLevel = 1
+	LogLevelError LogLevel = 2
+)
+
+func (l LogLevel) slogLevel() slog.Level {
+	switch l {
+	case LogLevelDebug:
+		return slog.LevelDebug
+	case LogLevelInfo:
+		return slog.LevelInfo
+	case LogLevelWarn:
+		return slog.LevelWarn
+	case LogLevelError:
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+// Logger provides leveled logging with both structured key-value methods
+// (Debug/Info/Warn/Error) and printf-style helpers (Debugf/Infof/Warnf/Errorf).
+// It also provides Writer(level) for piping subprocess output at a given level.
+type Logger struct {
+	slog     *slog.Logger
+	levelVar *slog.LevelVar
+	level    LogLevel
+	writer   io.Writer
+}
+
+func newLogger(w io.Writer, level LogLevel) *Logger {
+	lv := &slog.LevelVar{}
+	lv.Set(level.slogLevel())
+	return &Logger{
+		slog:     slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: lv})),
+		levelVar: lv,
+		level:    level,
+		writer:   w,
+	}
+}
+
+// Debug logs at debug level with optional key-value pairs.
+func (l *Logger) Debug(msg string, args ...any) { l.slog.Debug(msg, args...) }
+
+// Info logs at info level with optional key-value pairs.
+func (l *Logger) Info(msg string, args ...any) { l.slog.Info(msg, args...) }
+
+// Warn logs at warn level with optional key-value pairs.
+func (l *Logger) Warn(msg string, args ...any) { l.slog.Warn(msg, args...) }
+
+// Error logs at error level with optional key-value pairs.
+func (l *Logger) Error(msg string, args ...any) { l.slog.Error(msg, args...) }
+
+// Debugf logs at debug level using a printf-style format string.
+func (l *Logger) Debugf(format string, args ...any) { l.slog.Debug(fmt.Sprintf(format, args...)) }
+
+// Infof logs at info level using a printf-style format string.
+func (l *Logger) Infof(format string, args ...any) { l.slog.Info(fmt.Sprintf(format, args...)) }
+
+// Warnf logs at warn level using a printf-style format string.
+func (l *Logger) Warnf(format string, args ...any) { l.slog.Warn(fmt.Sprintf(format, args...)) }
+
+// Errorf logs at error level using a printf-style format string.
+func (l *Logger) Errorf(format string, args ...any) { l.slog.Error(fmt.Sprintf(format, args...)) }
+
+// Writer returns an io.Writer where every Write is logged as a flat message at
+// the given log level. Useful for piping subprocess output (e.g. stderr) into
+// the daemon log at a specific level.
+func (l *Logger) Writer(level LogLevel) io.Writer {
+	return &levelWriter{logger: l, level: level}
+}
+
+// SetLevel changes the minimum log level dynamically. Messages below this
+// level are discarded.
+func (l *Logger) SetLevel(level LogLevel) {
+	l.level = level
+	l.levelVar.Set(level.slogLevel())
+}
+
+// Printf logs at info level using a printf-style format string (backward
+// compatibility with *log.Logger).
+func (l *Logger) Printf(format string, args ...any) { l.Infof(format, args...) }
+
+// Println logs at info level (backward compatibility with *log.Logger).
+func (l *Logger) Println(args ...any) { l.Info(fmt.Sprint(args...)) }
+
+// levelWriter implements io.Writer, routing each write to the logger's
+// corresponding leveled method.
+type levelWriter struct {
+	logger *Logger
+	level  LogLevel
+}
+
+func (w *levelWriter) Write(p []byte) (int, error) {
+	msg := strings.TrimRight(string(p), "\n\r")
+	switch w.level {
+	case LogLevelDebug:
+		w.logger.Debug(msg)
+	case LogLevelInfo:
+		w.logger.Info(msg)
+	case LogLevelWarn:
+		w.logger.Warn(msg)
+	case LogLevelError:
+		w.logger.Error(msg)
+	}
+	return len(p), nil
+}
+
+// ─── StartupOptions ──────────────────────────────────────────────────────────
+
 // StartupOptions configures the daemon process when calling Start.
 type StartupOptions struct {
-	PipeStdoutToLogfile bool // redirect os.Stdout to daemon log file
-	PipeStderrToLogfile bool // redirect os.Stderr to daemon log file
+	PipeStdoutToLogfile bool    // redirect os.Stdout to daemon log file
+	PipeStderrToLogfile bool    // redirect os.Stderr to daemon log file
+	LogLevel            LogLevel // minimum log level to record (default Info)
 }
 
 // ─── Handler storage ────────────────────────────────────────────────────────
@@ -243,8 +362,14 @@ func Client[T any, C any](name string, setup func(ctx context.Context, impl *T, 
 		}
 		daemonLogPath = d.logPath()
 		daemonLogFile = logFile
-		daemonLogger = log.New(logFile, "", log.LstdFlags)
+		daemonLogger = newLogger(logFile, LogLevelInfo)
 		defer func() { daemonLogFile.Close() }()
+
+		if lvlStr := os.Getenv(daemonLogLevelKey); lvlStr != "" {
+			if lvl, err := strconv.Atoi(lvlStr); err == nil {
+				daemonLogger.SetLevel(LogLevel(lvl))
+			}
+		}
 
 		if os.Getenv(daemonPipeStdoutKey) == "1" {
 			os.Stdout = logFile
@@ -509,7 +634,7 @@ func (d *Daemon[T, C]) serve(logFile *os.File, onReady func()) error {
 	}
 
 	if daemonLogger == nil {
-		daemonLogger = log.New(logFile, "", log.LstdFlags)
+		daemonLogger = newLogger(logFile, LogLevelInfo)
 	}
 
 	// Acquire exclusive lock on PID file.
@@ -679,10 +804,10 @@ func (d *Daemon[T, C]) sendErrorResponse(conn net.Conn, errMsg string) {
 
 // ─── Logging ────────────────────────────────────────────────────────────────
 
-// Logger returns the daemon's logger for logging from handlers or goroutines
+// Log returns the daemon's logger for logging from handlers or goroutines
 // spawned during daemon operation. Returns nil if called from outside the
 // daemon process (e.g. from the client side).
-func Logger() *log.Logger {
+func Log() *Logger {
 	return daemonLogger
 }
 
@@ -718,7 +843,12 @@ func ArchiveLog() (string, error) {
 		return "", fmt.Errorf("failed to open new log file: %w", err)
 	}
 
-	daemonLogger.SetOutput(newFile)
+	// Recreate the slog handler with the new file at the same level.
+	lv := &slog.LevelVar{}
+	lv.Set(daemonLogger.level.slogLevel())
+	daemonLogger.slog = slog.New(slog.NewTextHandler(newFile, &slog.HandlerOptions{Level: lv}))
+	daemonLogger.levelVar = lv
+	daemonLogger.writer = newFile
 	old := daemonLogFile
 	daemonLogFile = newFile
 	old.Close()
@@ -862,6 +992,9 @@ func (d *Daemon[T, C]) Start(cfg C, opts *StartupOptions) error {
 		}
 		if opts.PipeStderrToLogfile {
 			env[daemonPipeStderrKey] = "1"
+		}
+		if opts.LogLevel != LogLevelInfo {
+			env[daemonLogLevelKey] = strconv.Itoa(int(opts.LogLevel))
 		}
 	}
 	rv := reflect.ValueOf(cfg)
