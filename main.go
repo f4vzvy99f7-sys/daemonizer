@@ -15,7 +15,7 @@ type MathClient struct {
 	Inc   func() (int, error)
 }
 
-var client = daemon.Client[MathClient]("my-service", func(ctx context.Context, impl *MathClient, _ daemon.Args) (daemon.CleanupFunc, error) {
+var client = daemon.Client("my-service", func(ctx context.Context, impl *MathClient, args daemon.Args) (daemon.CleanupFunc, error) {
 	counter := 0
 
 	impl.Add = func(a, b int) (int, error) {
@@ -23,6 +23,10 @@ var client = daemon.Client[MathClient]("my-service", func(ctx context.Context, i
 		return a + b, nil
 	}
 	impl.Greet = func(name string) (string, error) {
+		if greeting, ok := args["greeting"]; ok {
+			daemon.Logger().Printf("Greeting %s", greeting)
+			return fmt.Sprintf("Hello, %s!", greeting), nil
+		}
 		daemon.Logger().Printf("Greeting %s", name)
 		return fmt.Sprintf("Hello, %s!", name), nil
 	}
@@ -66,7 +70,9 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		if err := daemon.Start(client, nil); err != nil {
+		if err := daemon.Start(client, &daemon.StartupOptions{Args: daemon.Args{
+			"greeting": "stupid",
+		}}); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}

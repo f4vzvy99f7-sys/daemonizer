@@ -39,7 +39,9 @@ func TestExampleClient(t *testing.T) {
 		}, nil
 	})
 
-	err := daemon.Start(client, &daemon.StartupOptions{})
+	err := daemon.Start(client, &daemon.StartupOptions{Args: daemon.Args{
+		"foobar": "4",
+	}})
 	defer daemon.Stop(client)
 	if err != nil {
 		t.Error(err)
