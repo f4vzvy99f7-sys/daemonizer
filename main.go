@@ -15,7 +15,7 @@ type MathClient struct {
 	Inc   func() (int, error)
 }
 
-var client = daemon.Client[MathClient]("my-service", func(ctx context.Context, impl *MathClient) (daemon.CleanupFunc, error) {
+var client = daemon.Client[MathClient]("my-service", func(ctx context.Context, impl *MathClient, _ daemon.Args) (daemon.CleanupFunc, error) {
 	counter := 0
 
 	impl.Add = func(a, b int) (int, error) {

@@ -17,7 +17,7 @@ type MyClient struct {
 func TestExampleClient(t *testing.T) {
 	serviceName := t.Name()
 
-	client := daemon.Client(serviceName, func(ctx context.Context, impl *MyClient) (daemon.CleanupFunc, error) {
+	client := daemon.Client(serviceName, func(ctx context.Context, impl *MyClient, args daemon.Args) (daemon.CleanupFunc, error) {
 		var data = map[string]string{"foo": "bar"}
 
 		impl.GetRecord = func(key string) (*string, error) {

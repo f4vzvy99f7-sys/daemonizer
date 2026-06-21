@@ -15,7 +15,7 @@
 //	    Greet func(name string) (string, error)
 //	}
 //
-//	var client = daemon.Client[MyClient]("my-service", func(ctx context.Context, impl *MyClient) (daemon.CleanupFunc, error) {
+//	var client = daemon.Client[MyClient]("my-service", func(ctx context.Context, impl *MyClient, _ daemon.Args) (daemon.CleanupFunc, error) {
 //	    impl.Add = func(a, b int) (int, error) { return a + b, nil }
 //	    impl.Greet = func(name string) (string, error) {
 //	        return fmt.Sprintf("Hello, %s!", name), nil
@@ -40,11 +40,11 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/gob"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
-	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -87,6 +87,7 @@ const daemonEnvKey = "__DAEMON_SERVICE"
 const daemonReadyFDEnvKey = "__DAEMON_READY_FD"
 const daemonPipeStdoutKey = "DAEMONIZER_PIPE_STDOUT"
 const daemonPipeStderrKey = "DAEMONIZER_PIPE_STDERR"
+const daemonArgsKey = "DAEMONIZER_ARGS"
 
 // ErrNotRunning is returned by Start and Stop when the daemon process is not
 // running.
@@ -105,6 +106,11 @@ var daemonLogPath string
 // CleanupFunc is a function returned by the Client setup function that runs on
 // daemon shutdown.
 type CleanupFunc func()
+
+// Args is a map of named arguments passed to the daemon setup function from
+// StartupOptions. Values are JSON-serialized to an env var and reconstructed
+// inside the daemon process.
+type Args map[string]string
 
 // Writer is an io.Writer that can be passed as an argument to daemon handler
 // functions. On the client side, Wrap creates a Writer from any io.Writer.
@@ -139,7 +145,7 @@ func Wrap(w io.Writer) Writer { return Writer{w: w} }
 
 // StartupOptions configures the daemon process when calling Start.
 type StartupOptions struct {
-	Env                 map[string]string
+	Args                Args
 	PipeStdoutToLogfile bool // redirect os.Stdout to daemon log file
 	PipeStderrToLogfile bool // redirect os.Stderr to daemon log file
 }
@@ -151,7 +157,13 @@ func Start(client any, opts *StartupOptions) error {
 	}
 	env := make(map[string]string)
 	if opts != nil {
-		maps.Copy(env, opts.Env)
+		if len(opts.Args) > 0 {
+			jsonData, err := json.Marshal(opts.Args)
+			if err != nil {
+				return fmt.Errorf("failed to marshal args: %w", err)
+			}
+			env[daemonArgsKey] = string(jsonData)
+		}
 		if opts.PipeStdoutToLogfile {
 			env[daemonPipeStdoutKey] = "1"
 		}
@@ -255,7 +267,7 @@ func (d *Daemon) getConn() (net.Conn, error) {
 //
 // Client panics on configuration errors — it is designed to be called at
 // package level and fail fast if things are misconfigured.
-func Client[T any](name string, setup func(ctx context.Context, impl *T) (CleanupFunc, error)) *T {
+func Client[T any](name string, setup func(ctx context.Context, impl *T, args Args) (CleanupFunc, error)) *T {
 	d := &Daemon{name: name}
 
 	// ── Daemon branch ──
@@ -305,7 +317,16 @@ func Client[T any](name string, setup func(ctx context.Context, impl *T) (Cleanu
 		ctx, cancel := context.WithCancel(context.Background())
 
 		impl := new(T)
-		cleanup, err := setup(ctx, impl)
+		var args Args
+		if argsJSON := os.Getenv(daemonArgsKey); argsJSON != "" {
+			if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+				cancel()
+				signalReady(fmt.Sprintf("failed to unmarshal args: %v", err))
+				fmt.Fprintf(os.Stderr, "daemon setup error: failed to unmarshal args: %v\n", err)
+				os.Exit(1)
+			}
+		}
+		cleanup, err := setup(ctx, impl, args)
 		if err != nil {
 			cancel()
 			signalReady(fmt.Sprintf("setup error: %v", err))
