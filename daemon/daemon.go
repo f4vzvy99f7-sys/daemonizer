@@ -1,8 +1,7 @@
 // Package daemon provides a library for building long-lived daemon processes
 // with type-safe IPC for Go CLI tools. A single binary acts as both the daemon
-// and the client: the daemon is automatically started and detached when the
-// client first connects, and subsequent invocations communicate with it over a
-// Unix socket.
+// and the client: the daemon is automatically started and detached via Start,
+// and subsequent invocations communicate with it over a Unix socket.
 //
 // Handlers run exclusively in the daemon process. All communication between
 // client and daemon happens through function arguments and return values — there
@@ -15,7 +14,7 @@
 //	    Greet func(name string) (string, error)
 //	}
 //
-//	var client = daemon.Client[MyClient]("my-service", func(ctx context.Context, impl *MyClient, _ daemon.Args) (daemon.CleanupFunc, error) {
+//	var d = daemon.Client[MyClient, struct{}]("my-service", func(ctx context.Context, impl *MyClient, _ struct{}) (daemon.CleanupFunc, error) {
 //	    impl.Add = func(a, b int) (int, error) { return a + b, nil }
 //	    impl.Greet = func(name string) (string, error) {
 //	        return fmt.Sprintf("Hello, %s!", name), nil
@@ -24,10 +23,10 @@
 //	})
 //
 //	func main() {
-//	    if daemon.IsRunning(client) {
-//	        fmt.Println(client.Add(1, 2)) // 3
+//	    if d.IsRunning() {
+//	        fmt.Println(d.Client.Add(1, 2)) // 3
 //	    } else {
-//	        daemon.Start(client, nil)
+//	        d.Start(struct{}{}, nil)
 //	    }
 //	}
 //
@@ -87,15 +86,11 @@ const daemonEnvKey = "__DAEMON_SERVICE"
 const daemonReadyFDEnvKey = "__DAEMON_READY_FD"
 const daemonPipeStdoutKey = "DAEMONIZER_PIPE_STDOUT"
 const daemonPipeStderrKey = "DAEMONIZER_PIPE_STDERR"
-const daemonArgsKey = "DAEMONIZER_ARGS"
+const daemonConfigKey = "DAEMONIZER_CONFIG"
 
 // ErrNotRunning is returned by Start and Stop when the daemon process is not
 // running.
 var ErrNotRunning = errors.New("daemon is not running")
-
-// registry maps client pointers (*T as any) to their associated *Daemon.
-// Populated by Client; used by Start, Stop, and IsRunning.
-var registry sync.Map
 
 var daemonLogger *log.Logger
 var daemonLogFile *os.File
@@ -106,11 +101,6 @@ var daemonLogPath string
 // CleanupFunc is a function returned by the Client setup function that runs on
 // daemon shutdown.
 type CleanupFunc func()
-
-// Args is a map of named arguments passed to the daemon setup function from
-// StartupOptions. Values are JSON-serialized to an env var and reconstructed
-// inside the daemon process.
-type Args map[string]string
 
 // Writer is an io.Writer that can be passed as an argument to daemon handler
 // functions. On the client side, Wrap creates a Writer from any io.Writer.
@@ -140,54 +130,13 @@ func (w *Writer) GobDecode(data []byte) error {
 // Wrap wraps an io.Writer into a Writer for passing to daemon handler
 // functions. Typically used on the client side:
 //
-//	client.PrintRecords(daemon.Wrap(os.Stdout))
+//	d.Client.PrintRecords(daemon.Wrap(os.Stdout))
 func Wrap(w io.Writer) Writer { return Writer{w: w} }
 
 // StartupOptions configures the daemon process when calling Start.
 type StartupOptions struct {
-	Args                Args
 	PipeStdoutToLogfile bool // redirect os.Stdout to daemon log file
 	PipeStderrToLogfile bool // redirect os.Stderr to daemon log file
-}
-
-func Start(client any, opts *StartupOptions) error {
-	d, ok := registry.Load(client)
-	if !ok {
-		return fmt.Errorf("client not found in registry")
-	}
-	env := make(map[string]string)
-	if opts != nil {
-		if len(opts.Args) > 0 {
-			jsonData, err := json.Marshal(opts.Args)
-			if err != nil {
-				return fmt.Errorf("failed to marshal args: %w", err)
-			}
-			env[daemonArgsKey] = string(jsonData)
-		}
-		if opts.PipeStdoutToLogfile {
-			env[daemonPipeStdoutKey] = "1"
-		}
-		if opts.PipeStderrToLogfile {
-			env[daemonPipeStderrKey] = "1"
-		}
-	}
-	return d.(*Daemon).start(env)
-}
-
-func Stop(client any) error {
-	d, ok := registry.Load(client)
-	if !ok {
-		return fmt.Errorf("client not found in registry")
-	}
-	return d.(*Daemon).stop()
-}
-
-func IsRunning(client any) bool {
-	d, ok := registry.Load(client)
-	if !ok {
-		return false
-	}
-	return d.(*Daemon).isRunning()
 }
 
 // ─── Handler storage ────────────────────────────────────────────────────────
@@ -198,18 +147,27 @@ type handler struct {
 	fnType reflect.Type
 }
 
-// Daemon holds configuration for a named service.
-type Daemon struct {
+// ─── Daemon ─────────────────────────────────────────────────────────────────
+
+// Daemon[T, C] holds the client stub and manages the daemon lifecycle.
+// T is the client type defining RPC methods as func fields.
+// C is the config type passed to setup when Start is called.
+type Daemon[T any, C any] struct {
+	Client *T // IPC stubs — call RPC methods on this field
+
 	name     string
 	handlers map[string]handler
 	cleanup  CleanupFunc
 	mu       sync.Mutex
-	conn     net.Conn // client-side connection; nil until first RPC, nilled by stop()
+	conn     net.Conn // client-side connection; nil until first RPC, nilled by Stop()
 }
+
+func (d *Daemon[T, C]) Lock()   { d.mu.Lock() }
+func (d *Daemon[T, C]) Unlock() { d.mu.Unlock() }
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
-func (d *Daemon) runtimeDir() string {
+func (d *Daemon[T, C]) runtimeDir() string {
 	dir := os.Getenv("XDG_RUNTIME_DIR")
 	if dir == "" {
 		dir = filepath.Join(os.TempDir(), fmt.Sprintf("daemon-%d", os.Getuid()))
@@ -217,7 +175,7 @@ func (d *Daemon) runtimeDir() string {
 	return dir
 }
 
-func (d *Daemon) stateDir() string {
+func (d *Daemon[T, C]) stateDir() string {
 	dir := os.Getenv("XDG_STATE_HOME")
 	if dir == "" {
 		home, err := os.UserHomeDir()
@@ -229,21 +187,19 @@ func (d *Daemon) stateDir() string {
 	return filepath.Join(dir, d.name)
 }
 
-func (d *Daemon) socketPath() string {
+func (d *Daemon[T, C]) socketPath() string {
 	return filepath.Join(d.runtimeDir(), d.name+".sock")
 }
 
-func (d *Daemon) pidPath() string {
+func (d *Daemon[T, C]) pidPath() string {
 	return filepath.Join(d.runtimeDir(), d.name+".pid")
 }
 
-func (d *Daemon) logPath() string {
+func (d *Daemon[T, C]) logPath() string {
 	return filepath.Join(d.stateDir(), d.name+".log")
 }
 
-// getConn returns the cached client connection, dialing if necessary.
-// Caller must hold d.mu.
-func (d *Daemon) getConn() (net.Conn, error) {
+func (d *Daemon[T, C]) getConn() (net.Conn, error) {
 	if d.conn != nil {
 		return d.conn, nil
 	}
@@ -263,12 +219,10 @@ func (d *Daemon) getConn() (net.Conn, error) {
 // Client runs setup, starts serving requests, and never returns (os.Exit).
 //
 // If the current process is a client, Client creates IPC stubs for each func
-// field on T and returns a *T ready for use.
-//
-// Client panics on configuration errors — it is designed to be called at
-// package level and fail fast if things are misconfigured.
-func Client[T any](name string, setup func(ctx context.Context, impl *T, args Args) (CleanupFunc, error)) *T {
-	d := &Daemon{name: name}
+// field on T and returns a *Daemon[T, C] ready for use. Call its Start method
+// to launch the daemon, then use the Client field for RPC calls.
+func Client[T any, C any](name string, setup func(ctx context.Context, impl *T, cfg C) (CleanupFunc, error)) *Daemon[T, C] {
+	d := &Daemon[T, C]{name: name}
 
 	// ── Daemon branch ──
 	if os.Getenv(daemonEnvKey) == d.name {
@@ -316,17 +270,18 @@ func Client[T any](name string, setup func(ctx context.Context, impl *T, args Ar
 
 		ctx, cancel := context.WithCancel(context.Background())
 
+		// Decode config from JSON-encoded env var.
 		impl := new(T)
-		var args Args
-		if argsJSON := os.Getenv(daemonArgsKey); argsJSON != "" {
-			if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		var cfg C
+		if configData := os.Getenv(daemonConfigKey); configData != "" {
+			if err := json.Unmarshal([]byte(configData), &cfg); err != nil {
 				cancel()
-				signalReady(fmt.Sprintf("failed to unmarshal args: %v", err))
-				fmt.Fprintf(os.Stderr, "daemon setup error: failed to unmarshal args: %v\n", err)
+				signalReady(fmt.Sprintf("failed to decode config: %v", err))
+				fmt.Fprintf(os.Stderr, "daemon setup error: failed to decode config: %v\n", err)
 				os.Exit(1)
 			}
 		}
-		cleanup, err := setup(ctx, impl, args)
+		cleanup, err := setup(ctx, impl, cfg)
 		if err != nil {
 			cancel()
 			signalReady(fmt.Sprintf("setup error: %v", err))
@@ -406,8 +361,15 @@ func Client[T any](name string, setup func(ctx context.Context, impl *T, args Ar
 		v.Field(i).Set(makeStub(d, field.Name, ft))
 	}
 
-	registry.Store(client, d)
-	return client
+	d.Client = client
+	return d
+}
+
+// connProvider is satisfied by *Daemon[T, C] for passing to makeStub.
+type connProvider interface {
+	getConn() (net.Conn, error)
+	Lock()
+	Unlock()
 }
 
 // ─── Client IPC stub ────────────────────────────────────────────────────────
@@ -415,7 +377,7 @@ func Client[T any](name string, setup func(ctx context.Context, impl *T, args Ar
 // makeStub creates a reflect.Value function that, when called, serializes
 // the arguments, sends an IPC request, and deserializes the response.
 // It uses d.getConn() to lazily establish the connection on first call.
-func makeStub(d *Daemon, method string, funcType reflect.Type) reflect.Value {
+func makeStub(d connProvider, method string, funcType reflect.Type) reflect.Value {
 	errType := reflect.TypeFor[error]()
 	writerType := reflect.TypeFor[Writer]()
 
@@ -469,8 +431,8 @@ func makeStub(d *Daemon, method string, funcType reflect.Type) reflect.Value {
 			return results
 		}
 
-		d.mu.Lock()
-		defer d.mu.Unlock()
+		d.Lock()
+		defer d.Unlock()
 
 		conn, err := d.getConn()
 		if err != nil {
@@ -536,7 +498,7 @@ func makeStub(d *Daemon, method string, funcType reflect.Type) reflect.Value {
 // serve starts the daemon: acquires the PID file lock, listens on the Unix
 // socket, and handles incoming connections. logFile is already opened by
 // Client before setup runs.
-func (d *Daemon) serve(logFile *os.File, onReady func()) error {
+func (d *Daemon[T, C]) serve(logFile *os.File, onReady func()) error {
 	if err := os.MkdirAll(d.runtimeDir(), 0700); err != nil {
 		return fmt.Errorf("failed to create runtime dir: %w", err)
 	}
@@ -606,7 +568,7 @@ func (d *Daemon) serve(logFile *os.File, onReady func()) error {
 
 // handleConnection reads requests from a single client connection and
 // dispatches them to the appropriate handler.
-func (d *Daemon) handleConnection(conn net.Conn) {
+func (d *Daemon[T, C]) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	for {
@@ -630,7 +592,7 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 
 // dispatch calls the registered handler for a request and sends back the
 // response, including any writer data.
-func (d *Daemon) dispatch(conn net.Conn, req *request) {
+func (d *Daemon[T, C]) dispatch(conn net.Conn, req *request) {
 	h, ok := d.handlers[req.Method]
 	if !ok {
 		d.sendErrorResponse(conn, fmt.Sprintf("unknown method: %q", req.Method))
@@ -703,7 +665,7 @@ func (cw *connWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (d *Daemon) sendErrorResponse(conn net.Conn, errMsg string) {
+func (d *Daemon[T, C]) sendErrorResponse(conn net.Conn, errMsg string) {
 	resp := response{Error: errMsg}
 	var buf bytes.Buffer
 	gob.NewEncoder(&buf).Encode(resp)
@@ -761,7 +723,7 @@ func ArchiveLog() (string, error) {
 
 // ─── Process management ─────────────────────────────────────────────────────
 
-func (d *Daemon) start(env map[string]string) error {
+func (d *Daemon[T, C]) start(env map[string]string) error {
 	if err := os.MkdirAll(d.runtimeDir(), 0700); err != nil {
 		return err
 	}
@@ -828,7 +790,7 @@ func (d *Daemon) start(env map[string]string) error {
 	}
 }
 
-func (d *Daemon) isRunning() bool {
+func (d *Daemon[T, C]) isRunning() bool {
 	conn, err := net.DialTimeout("unix", d.socketPath(), 500*time.Millisecond)
 	if err != nil {
 		return false
@@ -837,7 +799,7 @@ func (d *Daemon) isRunning() bool {
 	return true
 }
 
-func (d *Daemon) stop() error {
+func (d *Daemon[T, C]) stop() error {
 	if !d.isRunning() {
 		return nil
 	}
@@ -881,6 +843,43 @@ func (d *Daemon) stop() error {
 	}
 
 	return fmt.Errorf("daemon did not stop within timeout")
+}
+
+// ─── Public lifecycle methods ──────────────────────────────────────────────
+
+// Start launches the daemon process with the given config and startup options.
+// Start launches the daemon process with the given config and startup options.
+// cfg is JSON-encoded to the daemon subprocess and decoded before setup runs.
+func (d *Daemon[T, C]) Start(cfg C, opts *StartupOptions) error {
+	env := make(map[string]string)
+	if opts != nil {
+		if opts.PipeStdoutToLogfile {
+			env[daemonPipeStdoutKey] = "1"
+		}
+		if opts.PipeStderrToLogfile {
+			env[daemonPipeStderrKey] = "1"
+		}
+	}
+	rv := reflect.ValueOf(cfg)
+	if rv.IsValid() && !(rv.Kind() == reflect.Pointer && rv.IsNil()) {
+		var configBuf bytes.Buffer
+		if err := json.NewEncoder(&configBuf).Encode(cfg); err != nil {
+			return fmt.Errorf("failed to encode config: %w", err)
+		}
+		env[daemonConfigKey] = configBuf.String()
+	}
+	return d.start(env)
+}
+
+// Stop sends SIGTERM to the daemon process and waits for it to exit.
+func (d *Daemon[T, C]) Stop() error {
+	return d.stop()
+}
+
+// IsRunning checks whether the daemon process is currently alive by dialing
+// its Unix socket.
+func (d *Daemon[T, C]) IsRunning() bool {
+	return d.isRunning()
 }
 
 // ─── Wire protocol helpers ──────────────────────────────────────────────────

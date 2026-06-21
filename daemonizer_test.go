@@ -17,7 +17,7 @@ type MyClient struct {
 func TestExampleClient(t *testing.T) {
 	serviceName := t.Name()
 
-	client := daemon.Client(serviceName, func(ctx context.Context, impl *MyClient, args daemon.Args) (daemon.CleanupFunc, error) {
+	d := daemon.Client(serviceName, func(ctx context.Context, impl *MyClient, _ any) (daemon.CleanupFunc, error) {
 		var data = map[string]string{"foo": "bar"}
 
 		impl.GetRecord = func(key string) (*string, error) {
@@ -39,19 +39,17 @@ func TestExampleClient(t *testing.T) {
 		}, nil
 	})
 
-	err := daemon.Start(client, &daemon.StartupOptions{Args: daemon.Args{
-		"foobar": "4",
-	}})
-	defer daemon.Stop(client)
+	err := d.Start(map[string]string{}, nil)
+	defer d.Stop()
 	if err != nil {
 		t.Error(err)
 	}
 
-	if daemon.IsRunning(client) == false {
+	if d.IsRunning() == false {
 		t.Error("Daemon isnt running")
 	}
 
-	if record, err := client.GetRecord("foo"); err != nil {
+	if record, err := d.Client.GetRecord("foo"); err != nil {
 		t.Error(err)
 	} else if record == nil {
 		t.Error("record is nil")
@@ -60,7 +58,7 @@ func TestExampleClient(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err = client.PrintRecords(daemon.Wrap(&buf))
+	err = d.Client.PrintRecords(daemon.Wrap(&buf))
 	if err != nil {
 		t.Error(err)
 	}

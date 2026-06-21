@@ -15,7 +15,11 @@ type MathClient struct {
 	Inc   func() (int, error)
 }
 
-var client = daemon.Client("my-service", func(ctx context.Context, impl *MathClient, args daemon.Args) (daemon.CleanupFunc, error) {
+type Config struct {
+	Greeting string
+}
+
+var d = daemon.Client[MathClient, Config]("my-service", func(ctx context.Context, impl *MathClient, cfg Config) (daemon.CleanupFunc, error) {
 	counter := 0
 
 	impl.Add = func(a, b int) (int, error) {
@@ -23,9 +27,9 @@ var client = daemon.Client("my-service", func(ctx context.Context, impl *MathCli
 		return a + b, nil
 	}
 	impl.Greet = func(name string) (string, error) {
-		if greeting, ok := args["greeting"]; ok {
-			daemon.Logger().Printf("Greeting %s", greeting)
-			return fmt.Sprintf("Hello, %s!", greeting), nil
+		if cfg.Greeting != "" {
+			daemon.Logger().Printf("Greeting %s", cfg.Greeting)
+			return fmt.Sprintf("%s, %s!", cfg.Greeting, name), nil
 		}
 		daemon.Logger().Printf("Greeting %s", name)
 		return fmt.Sprintf("Hello, %s!", name), nil
@@ -50,7 +54,7 @@ func main() {
 
 	switch cmd {
 	case "start":
-		if err := daemon.Start(client, nil); err != nil {
+		if err := d.Start(Config{}, nil); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
@@ -58,7 +62,7 @@ func main() {
 		return
 
 	case "stop":
-		if err := daemon.Stop(client); err != nil {
+		if err := d.Stop(); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
@@ -66,13 +70,11 @@ func main() {
 		return
 
 	case "restart":
-		if err := daemon.Stop(client); err != nil {
+		if err := d.Stop(); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		if err := daemon.Start(client, &daemon.StartupOptions{Args: daemon.Args{
-			"greeting": "stupid",
-		}}); err != nil {
+		if err := d.Start(Config{Greeting: "stupid"}, nil); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
@@ -80,7 +82,7 @@ func main() {
 		return
 	}
 
-	if !daemon.IsRunning(client) {
+	if !d.IsRunning() {
 		fmt.Fprintf(os.Stderr, "daemon is not running — use '%s start' to start it\n", os.Args[0])
 		os.Exit(1)
 	}
@@ -101,7 +103,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "invalid argument %q: %v\n", os.Args[3], err)
 			os.Exit(1)
 		}
-		result, err := client.Add(a, b)
+		result, err := d.Client.Add(a, b)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -113,7 +115,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "usage: %s greet <name>\n", os.Args[0])
 			os.Exit(1)
 		}
-		msg, err := client.Greet(os.Args[2])
+		msg, err := d.Client.Greet(os.Args[2])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -121,7 +123,7 @@ func main() {
 		fmt.Println(msg)
 
 	case "inc":
-		count, err := client.Inc()
+		count, err := d.Client.Inc()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
