@@ -349,7 +349,8 @@ func Client[T any](name string, setup func(ctx context.Context, impl *T) (Cleanu
 	t := v.Type()
 
 	if t.Kind() != reflect.Struct {
-		panic(fmt.Sprintf("daemon.Client: type parameter must be a struct, got %v", t.Kind()))
+		fmt.Fprintf(os.Stderr, "daemon.Client: type parameter must be a struct, got %v\n", t.Kind())
+		os.Exit(1)
 	}
 
 	errType := reflect.TypeOf((*error)(nil)).Elem()
@@ -360,7 +361,8 @@ func Client[T any](name string, setup func(ctx context.Context, impl *T) (Cleanu
 		}
 		ft := field.Type
 		if ft.NumOut() == 0 || ft.Out(ft.NumOut()-1) != errType {
-			panic(fmt.Sprintf("daemon.Client: field %s must have error as last return value", field.Name))
+			fmt.Fprintf(os.Stderr, "daemon.Client: field %s must have error as last return value\n", field.Name)
+			os.Exit(1)
 		}
 		v.Field(i).Set(makeStub(d, field.Name, ft))
 	}
