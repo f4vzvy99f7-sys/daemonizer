@@ -63,9 +63,9 @@ import (
 type frameType byte
 
 const (
-	frameRequest     frameType = 0x01
-	frameResponse    frameType = 0x02
-	frameWriterData  frameType = 0x05
+	frameRequest    frameType = 0x01
+	frameResponse   frameType = 0x02
+	frameWriterData frameType = 0x05
 )
 
 // request is the gob-encoded payload sent from client to daemon.
@@ -299,7 +299,7 @@ func Client[T any](name string, setup func(ctx context.Context, impl *T) (Cleanu
 		v := reflect.ValueOf(impl).Elem()
 		t := v.Type()
 		reg := make(map[string]handler)
-		errType := reflect.TypeOf((*error)(nil)).Elem()
+		errType := reflect.TypeFor[error]()
 
 		for i := 0; i < t.NumField(); i++ {
 			field := t.Field(i)
@@ -353,7 +353,7 @@ func Client[T any](name string, setup func(ctx context.Context, impl *T) (Cleanu
 		os.Exit(1)
 	}
 
-	errType := reflect.TypeOf((*error)(nil)).Elem()
+	errType := reflect.TypeFor[error]()
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
 		if !field.IsExported() || field.Type.Kind() != reflect.Func {
@@ -377,14 +377,14 @@ func Client[T any](name string, setup func(ctx context.Context, impl *T) (Cleanu
 // the arguments, sends an IPC request, and deserializes the response.
 // It uses d.getConn() to lazily establish the connection on first call.
 func makeStub(d *Daemon, method string, funcType reflect.Type) reflect.Value {
-	errType := reflect.TypeOf((*error)(nil)).Elem()
-	writerType := reflect.TypeOf(Writer{})
+	errType := reflect.TypeFor[error]()
+	writerType := reflect.TypeFor[Writer]()
 
 	return reflect.MakeFunc(funcType, func(args []reflect.Value) []reflect.Value {
 		numOut := funcType.NumOut()
 		results := make([]reflect.Value, numOut)
 
-		for i := 0; i < numOut; i++ {
+		for i := range numOut {
 			results[i] = reflect.Zero(funcType.Out(i))
 		}
 
@@ -600,7 +600,7 @@ func (d *Daemon) dispatch(conn net.Conn, req *request) {
 
 	dec := gob.NewDecoder(bytes.NewReader(req.Args))
 	args := make([]reflect.Value, h.fnType.NumIn())
-	writerType := reflect.TypeOf(Writer{})
+	writerType := reflect.TypeFor[Writer]()
 
 	for i := 0; i < h.fnType.NumIn(); i++ {
 		paramType := h.fnType.In(i)
